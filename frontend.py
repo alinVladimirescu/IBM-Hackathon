@@ -2,140 +2,134 @@ import streamlit as st
 import requests
 import os
 import json
-import time
+import pandas as pd
 
-# --- Configuration ---
-# You MUST set these environment variables before running the application:
-# 1. WATSONX_ORCHESTRATE_ENDPOINT: The URL to your Orchestrate chat completions endpoint.
-#    e.g., "https://orchestrate.ibm.cloud/api/v1/orchestrate/AGENT_ID/chat/completions"
-# 2. WATSONX_API_KEY: Your IBM Cloud/watsonx API key.
-# 3. WATSONX_PROJECT_ID: Your watsonx Project ID (if required by your agent).
-# You can set them in your terminal:
-# export WATSONX_ORCHESTRATE_ENDPOINT="<YOUR_ENDPOINT>"
-# export WATSONX_API_KEY="<YOUR_API_KEY>"
+API_KEY = os.environ.get("WATSONX_API_KEY", "API_KEY_PLACEHOLDER") 
+ORCHESTRATE_ENDPOINT = os.environ.get("WATSONX_ORCHESTRATE_ENDPOINT", "https://api.us-south.orchestrate.watson.cloud.ibm.com/v1/agents/YOUR_AGENT_ID/chat")
 
-# Load configuration from environment variables
-ORCHESTRATE_ENDPOINT = os.getenv("WATSONX_ORCHESTRATE_ENDPOINT")
-API_KEY = os.getenv("WATSONX_API_KEY")
-
-# --- Streamlit UI Setup ---
 st.set_page_config(page_title="Watsonx Orchestrate Chat", layout="centered")
-st.title("🤖 Orchestrate Agent Chat")
-st.markdown("Interact with your watsonx Orchestrate Agent.")
+st.title("🤖 Orchestrate Agent + File Upload")
 
-# --- Helper Functions ---
+with st.sidebar:
+    st.header("Configuration")
+    st.info(f"API Key Status: {'✅ Loaded' if API_KEY else '❌ Missing'}")
+    
+    st.divider()
+    
+    st.header("📄 Upload Document")
+    uploaded_file = st.file_uploader("Attach a file (Text, CSV, JSON)", type=["txt", "csv", "json"])
+    
+    file_content = ""
+    if uploaded_file is not None:
+        try:
+            if uploaded_file.type == "application/json":
+                data = json.load(uploaded_file)
+                file_content = json.dumps(data, indent=2)
+                st.success("JSON loaded successfully!")
+            elif uploaded_file.type == "text/csv":
+                df = pd.read_csv(uploaded_file)
+                file_content = df.to_string()
+                st.success("CSV loaded successfully!")
+            else:
+                stringio = uploaded_file.getvalue().decode("utf-8")
+                file_content = stringio
+                st.success("Text file loaded successfully!")
+            
+            with st.expander("Preview File Content"):
+                st.code(file_content[:500] + "..." if len(file_content) > 500 else file_content)
+                
+        except Exception as e:
+            st.error(f"Error reading file: {e}")
+
+
+def get_iam_token(api_key):
+    url = "https://iam.cloud.ibm.com/identity/token"
+    headers = {"Content-Type": "application/x-www-form-urlencoded"}
+    data = {
+        "grant_type": "urn:ibm:params:oauth:grant-type:apikey",
+        "apikey": api_key
+    }
+    try:
+        response = requests.post(url, headers=headers, data=data)
+        response.raise_for_status()
+        return response.json()["access_token"]
+    except Exception as e:
+        st.error(f"Authentication Failed: {e}")
+        return None
 
 def call_watsonx_orchestrate(messages):
-    """
-    Simulates calling the watsonx Orchestrate chat completions endpoint.
-    
-    NOTE: This is the function you must customize with your specific
-    API integration details, including the correct payload and headers.
-    """
     if not API_KEY or not ORCHESTRATE_ENDPOINT:
-        st.error("API Key or Orchestrate Endpoint not configured. Please set WATSONX_API_KEY and WATSONX_ORCHESTRATE_ENDPOINT environment variables.")
-        return "Error: Backend configuration missing."
+        return "Error: Configuration missing. Please check API Key and Endpoint."
 
-    # The messages list will be the conversation history from Streamlit session state
-    # formatted for the Orchestrate API (often compatible with OpenAI's format).
+    access_token = get_iam_token(API_KEY)
+    if not access_token:
+        return "Error: Could not generate access token."
+
+    last_user_message = messages[-1]["content"]
     
-    # Extract the 'content' part of the last user message to use as the query
-    # The Orchestrate API often accepts the entire history, but we'll focus on the content
-    # for a simple prompt.
-    user_query = messages[-1]["content"] if messages and messages[-1]["role"] == "user" else "Hello"
-
-    # Define the payload for the watsonx Orchestrate API call
-    # This structure is often used for agents/orchestrators.
     payload = {
-        "messages": [
-            {"role": "user", "content": user_query}
-        ],
-        # You may need to add other parameters depending on your agent/model
-        "additional_parameters": {},
-        "context": {},
-        "stream": False # Set to True if you want to implement streaming logic
+        "input": {
+            "message_type": "text",
+            "text": last_user_message
+        }
     }
     
-    # Headers for Bearer Token Authentication
     headers = {
-        "Authorization": f"Bearer {API_KEY}",
+        "Authorization": f"Bearer {access_token}",
         "Content-Type": "application/json"
     }
 
     try:
-        # The timeout prevents the app from hanging indefinitely
         with st.spinner("Waiting for Orchestrate Agent..."):
             response = requests.post(
                 ORCHESTRATE_ENDPOINT, 
                 headers=headers, 
                 json=payload, 
-                timeout=30 # 30 second timeout for the response
+                timeout=30
             )
-            response.raise_for_status() # Raise an HTTPError for bad responses (4xx or 5xx)
+            
+            if response.status_code != 200:
+                return f"Error {response.status_code}: {response.text}"
 
-            # Process the response JSON
             response_data = response.json()
             
-            # The structure often follows the OpenAI chat format:
-            # response_data["choices"][0]["message"]["content"]
-            
-            # Handle possible empty or unexpected responses
-            if 'choices' in response_data and response_data['choices']:
-                agent_message = response_data['choices'][0]['message']['content']
-                return agent_message
+            if 'output' in response_data and 'text' in response_data['output']:
+                text_response = response_data['output']['text']
+                return "\n".join(text_response) if isinstance(text_response, list) else text_response
+            elif 'choices' in response_data:
+                return response_data['choices'][0]['message']['content']
             else:
-                return f"Agent returned an empty or unrecognized response: {json.dumps(response_data, indent=2)}"
+                return f"Raw Response: {json.dumps(response_data, indent=2)}"
 
-    except requests.exceptions.RequestException as e:
-        return f"An API request error occurred: {e}"
     except Exception as e:
-        return f"An unexpected error occurred: {e}"
+        return f"Connection Error: {e}"
 
-# --- Main Application Logic ---
-
-# 1. Initialize chat history
 if "messages" not in st.session_state:
     st.session_state.messages = [
-        {"role": "assistant", "content": "Hello! I am connected to the watsonx Orchestrate Agent. How can I help you today?"}
+        {"role": "assistant", "content": "Hello! Upload a file or ask me a question."}
     ]
-
-# 2. Display existing messages
 for message in st.session_state.messages:
-    # Use 'user' for user messages and 'assistant' for the agent's responses
     avatar = "🧑‍💻" if message["role"] == "user" else "🤖"
     with st.chat_message(message["role"], avatar=avatar):
         st.markdown(message["content"])
+if prompt := st.chat_input("Type your message..."):
+    
+    final_prompt = prompt
+    if file_content:
+        final_prompt = f"Context from uploaded file:\n\n{file_content}\n\nUser Question:\n{prompt}"
+        st.toast("File content added to message!", icon="📎")
 
-# 3. Handle new user input
-if prompt := st.chat_input("Ask your watsonx Orchestrate agent a question..."):
-    # Add user message to chat history and display it
     st.session_state.messages.append({"role": "user", "content": prompt})
+    
     with st.chat_message("user", avatar="🧑‍💻"):
         st.markdown(prompt)
 
-    # Prepare the messages list for the API call
-    # We pass the entire history for context
-    messages_for_api = st.session_state.messages
+    api_messages = st.session_state.messages.copy()
+    api_messages[-1]["content"] = final_prompt
 
-    # Call the Orchestrate Agent
-    assistant_response_content = call_watsonx_orchestrate(messages_for_api)
+    response_text = call_watsonx_orchestrate(api_messages)
     
-    # Display and save the response
     with st.chat_message("assistant", avatar="🤖"):
-        st.markdown(assistant_response_content)
+        st.markdown(response_text)
     
-    # Append the assistant's response to the chat history
-    st.session_state.messages.append({"role": "assistant", "content": assistant_response_content})
-
-# Optional: Configuration sidebar for debugging (useful for local development)
-st.sidebar.title("Configuration Status")
-if API_KEY:
-    st.sidebar.success("API Key is configured.")
-else:
-    st.sidebar.error("WATSONX_API_KEY missing.")
-
-if ORCHESTRATE_ENDPOINT:
-    st.sidebar.success("Orchestrate Endpoint is configured.")
-    st.sidebar.info(f"Endpoint: {ORCHESTRATE_ENDPOINT.split('/chat/completions')[0]}")
-else:
-    st.sidebar.error("WATSONX_ORCHESTRATE_ENDPOINT missing.")
+    st.session_state.messages.append({"role": "assistant", "content": response_text})
