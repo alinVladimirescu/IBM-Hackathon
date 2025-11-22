@@ -32,7 +32,7 @@ def load_course_catalog():
     try:
         with open(COURSE_CATALOG_FILE, 'r') as f:
             catalog = json.load(f)
-            print(f"✅ Loaded {len(catalog)} courses from {COURSE_CATALOG_FILE}")
+            print(f" Loaded {len(catalog)} courses from {COURSE_CATALOG_FILE}")
             return catalog
     except FileNotFoundError:
         return []
