@@ -1,16 +1,16 @@
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from typing import List, Optional
-import os
-import requests
 import json
+import requests
+import os
 
 app = FastAPI()
 
 WATSONX_API_KEY = "API_KEY_PLACEHOLDER"
 WATSONX_PROJECT_ID = "PROJECT_ID_PLACEHOLDER"
-WATSONX_URL = "https://us-south.ml.cloud.ibm.com"
-WATSONX_MODEL = "ibm/granite-13b-chat-v2"
+WATSONX_URL = "https://us-south.ml.cloud.ibm.com/ml/v1/text/generation?version=2023-05-29"
+
 
 class Employee(BaseModel):
     employee_id: str
@@ -19,69 +19,138 @@ class Employee(BaseModel):
     position: str
 
 class ProcessEmployeesRequest(BaseModel):
-    employees: List[Employee]  
+    employees: List[Employee]
 
 class SkillPredictionRequest(BaseModel):
     employee_name: Optional[str] = None
     position: str
     seniority_level: str
 
-class CourseRecommendationRequest(BaseModel):
-    skills: List[str]
-    position: Optional[str] = None
-    seniority_level: Optional[str] = None
+COURSE_CATALOG_FILE = "course_catalog.json"
 
-COURSE_CATALOG = [
-    {"course_name": "Kubernetes Mastery", "provider": "Udemy", "duration_hours": 16, "cost": 399, "skills_covered": ["Kubernetes", "Docker"]},
-    {"course_name": "Python for Data Science", "provider": "Coursera", "duration_hours": 24, "cost": 299, "skills_covered": ["Python", "Machine Learning"]},
-    {"course_name": "AWS Solutions Architect", "provider": "A Cloud Guru", "duration_hours": 40, "cost": 499, "skills_covered": ["AWS", "Cloud"]},
-    {"course_name": "Leadership Essentials", "provider": "LinkedIn", "duration_hours": 12, "cost": 199, "skills_covered": ["Leadership"]},
-    {"course_name": "CI/CD Pipelines", "provider": "Pluralsight", "duration_hours": 8, "cost": 149, "skills_covered": ["CI/CD", "DevOps"]},
-    {"course_name": "JavaScript Advanced", "provider": "Udemy", "duration_hours": 20, "cost": 349, "skills_covered": ["JavaScript", "React"]},
-    {"course_name": "Terraform IaC", "provider": "HashiCorp", "duration_hours": 10, "cost": 249, "skills_covered": ["Terraform", "Cloud"]},
-]
+def load_course_catalog():
+    try:
+        with open(COURSE_CATALOG_FILE, 'r') as f:
+            catalog = json.load(f)
+            print(f"✅ Loaded {len(catalog)} courses from {COURSE_CATALOG_FILE}")
+            return catalog
+    except FileNotFoundError:
+        return []
+    except json.JSONDecodeError as e:
+        return []
+
+COURSE_CATALOG = load_course_catalog()
 
 def get_watsonx_token():
     token_url = "https://iam.cloud.ibm.com/identity/token"
     headers = {"Content-Type": "application/x-www-form-urlencoded"}
     data = {"grant_type": "urn:ibm:params:oauth:grant-type:apikey", "apikey": WATSONX_API_KEY}
-    response = requests.post(token_url, headers=headers, data=data)
+    response = requests.post(token_url, headers=headers, data=data, timeout=10)
     if response.status_code != 200:
-        raise Exception(f"Failed to get token")
+        raise Exception(f"Failed to get token: {response.text}")
     return response.json()["access_token"]
 
-def predict_skills_with_watsonx(position: str, seniority_level: str) -> List[str]:
+def call_watsonx(prompt: str, max_tokens: int = 512) -> str:
+    try:
+        token = get_watsonx_token()
+        headers = {"Accept": "application/json", "Content-Type": "application/json", "Authorization": f"Bearer {token}"}
+        body = {
+            "model_id": "ibm/granite-3-8b-instruct",
+            "input": prompt,
+            "parameters": {"decoding_method": "greedy", "max_new_tokens": max_tokens, "temperature": 0.3},
+            "project_id": WATSONX_PROJECT_ID
+        }
+        
+        response = requests.post(WATSONX_URL, headers=headers, json=body, timeout=30)
+        
+        if response.status_code == 200:
+            result = response.json()
+            return result["results"][0]["generated_text"].strip()
+        else:
+            return None
+    except Exception as e:
+        return None
+
+def predict_skills_with_ai(position: str, seniority_level: str) -> List[str]:
     prompt = f"""Predict 8-12 skills for: {position} ({seniority_level})
 
 Return ONLY a JSON array like: ["Python", "Docker", "Leadership"]
 
 Your response:"""
 
-    try:
-        token = get_watsonx_token()
-        headers = {"Accept": "application/json", "Content-Type": "application/json", "Authorization": f"Bearer {token}"}
-        body = {
-            "model_id": WATSONX_MODEL,
-            "input": prompt,
-            "parameters": {"decoding_method": "greedy", "max_new_tokens": 200, "temperature": 0.3},
-            "project_id": WATSONX_PROJECT_ID
-        }
-        
-        response = requests.post(WATSONX_URL, headers=headers, json=body)
-        if response.status_code == 200:
-            result = response.json()
-            text = result["results"][0]["generated_text"].strip().replace("```json", "").replace("```", "").strip()
-            skills = json.loads(text)
+    response = call_watsonx(prompt, max_tokens=512)
+    
+    if response:
+        try:
+            cleaned = response.replace("```json", "").replace("```", "").strip()
+            skills = json.loads(cleaned)
             if isinstance(skills, list) and len(skills) > 0:
                 return skills
-    except Exception as e:
-        print(f"WatsonX Error: {e}")
-    
+        except:
+            pass
     
     return fallback_skills(position, seniority_level)
 
+def recommend_courses_with_ai(skills: List[str], position: str, seniority_level: str) -> List[dict]:
+    
+    courses_text = "\n".join([
+        f"{i+1}. {c['course_name']} - {', '.join(c['skills_covered'])}"
+        for i, c in enumerate(COURSE_CATALOG)
+    ])
+    
+    prompt = f"""Recommend top 5 courses for:
+Position: {position}
+Skills: {', '.join(skills)}
+
+Courses:
+{courses_text}
+You ARE absolutely needed to recommend at least one course to every person!
+Return JSON array:
+[{{"course_name": "exact name", "priority": "high/medium/low", "reason": "why"}}]
+
+Your response:"""
+
+    response = call_watsonx(prompt, max_tokens=800)
+    if response:
+            cleaned = response.replace("```json", "").replace("```", "").strip()
+            
+            recs = json.loads(cleaned)
+            
+            if isinstance(recs, list) and len(recs) > 0:
+                enriched = []
+                for rec in recs:  # Don't limit to 5 here - take all AI recommendations
+                    course_name = rec.get('course_name', '').strip()
+                    
+                    course = next((c for c in COURSE_CATALOG if c['course_name'].lower() == course_name.lower()), None)
+                    
+                    if not course:
+                        course = next((c for c in COURSE_CATALOG if c['course_name'].lower() in course_name.lower() or course_name.lower() in c['course_name'].lower()), None)
+                        
+                    if course:
+                        enriched.append({
+                            "course_name": course["course_name"],
+                            "provider": course["provider"],
+                            "duration_hours": course["duration_hours"],
+                            "cost": course["cost"],
+                            "priority": rec.get("priority", "medium"),
+                            "matched_skills": [s for s in skills if s in course["skills_covered"]],
+                            "reason": rec.get("reason", "Recommended for your role")
+                        })
+                    else:
+                        enriched.append({
+                            "course_name": course_name,
+                            "provider": "AI Recommendation",
+                            "duration_hours": 0,
+                            "cost": 0,
+                            "priority": rec.get("priority", "medium"),
+                            "matched_skills": [], 
+                            "reason": rec.get("reason", "Recommended by AI")
+                        })
+                
+    return fallback_courses(skills)
+
 def fallback_skills(position: str, seniority_level: str) -> List[str]:
-    base = ["Communication", "Problem Solving"]
+    base = ["Communication", "Problem Solving", "Teamwork"]
     if "software" in position.lower() or "developer" in position.lower():
         base.extend(["Python", "JavaScript", "Git", "Docker"])
     elif "devops" in position.lower():
@@ -92,11 +161,11 @@ def fallback_skills(position: str, seniority_level: str) -> List[str]:
         base.extend(["Roadmapping", "Analytics", "Agile"])
     
     if "senior" in seniority_level.lower():
-        base.append("Leadership")
+        base.extend(["Leadership", "Mentoring"])
     
     return list(set(base))
 
-def recommend_courses(skills: List[str]) -> List[dict]:
+def fallback_courses(skills: List[str]) -> List[dict]:
     recommendations = []
     for course in COURSE_CATALOG:
         matched = [s for s in skills if s in course["skills_covered"]]
@@ -107,7 +176,8 @@ def recommend_courses(skills: List[str]) -> List[dict]:
                 "duration_hours": course["duration_hours"],
                 "cost": course["cost"],
                 "priority": "high" if len(matched) >= 2 else "medium",
-                "matched_skills": matched
+                "matched_skills": matched,
+                "reason": f"Matches {', '.join(matched[:2])}"
             })
     recommendations.sort(key=lambda x: (0 if x["priority"]=="high" else 1, -len(x["matched_skills"])))
     return recommendations[:5]
@@ -115,14 +185,10 @@ def recommend_courses(skills: List[str]) -> List[dict]:
 @app.post("/process-employees")
 async def process_employees(request: ProcessEmployeesRequest):
     try:
-        print(f"\n📥 Processing {len(request.employees)} employees")
-        
         results = []
         for emp in request.employees:
-            print(f"   {emp.employee_name} - {emp.position}")
-            
-            skills = predict_skills_with_watsonx(emp.position, emp.seniority_level)
-            courses = recommend_courses(skills)
+            skills = predict_skills_with_ai(emp.position, emp.seniority_level)
+            courses = recommend_courses_with_ai(skills, emp.position, emp.seniority_level)
             
             results.append({
                 "employee_id": emp.employee_id,
@@ -133,36 +199,30 @@ async def process_employees(request: ProcessEmployeesRequest):
                 "recommended_courses": courses
             })
         
-        print(f"Done: {len(results)} employees\n")
         return {"total_employees": len(results), "employees": results}
     
     except Exception as e:
-        print(f" Error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/predict-skills")
 async def predict_skills(request: SkillPredictionRequest):
-    skills = predict_skills_with_watsonx(request.position, request.seniority_level)
+    skills = predict_skills_with_ai(request.position, request.seniority_level)
     return {
         "employee_name": request.employee_name,
         "position": request.position,
         "seniority_level": request.seniority_level,
         "predicted_skills": skills,
-        "prediction_method": "IBM WatsonX.ai"
+        "prediction_method": "WatsonX AI (Cloud API)"
     }
-
-@app.post("/recommend-courses")
-async def recommend_courses_endpoint(request: CourseRecommendationRequest):
-    courses = recommend_courses(request.skills)
-    return {"total_matches": len(courses), "courses": courses}
-
-@app.get("/courses")
-async def get_courses():
-    return {"total_courses": len(COURSE_CATALOG), "courses": COURSE_CATALOG}
 
 @app.get("/")
 async def root():
-    return {"service": "Course Recommender", "version": "3.0.0", "status": "healthy"}
+    return {
+        "service": "M&A Employee Onboarding System",
+        "version": "6.0.0 - WatsonX API",
+        "method": "Cloud AI (Fast!)",
+        "status": "healthy"
+    }
 
 if __name__ == "__main__":
     import uvicorn
