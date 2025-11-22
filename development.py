@@ -7,8 +7,8 @@ import os
 
 app = FastAPI()
 
-WATSONX_API_KEY = "API_KEY_PLACEHOLDER"
-WATSONX_PROJECT_ID = "PROJECT_ID_PLACEHOLDER"
+WATSONX_API_KEY = "D74HUbqJBigx4hUz2QHJISQCXPFFbHN6jk0mWpYCswJh"
+WATSONX_PROJECT_ID = "6fd95f57-1729-42ef-acd9-8021d6f25da0"
 WATSONX_URL = "https://us-south.ml.cloud.ibm.com/ml/v1/text/generation?version=2023-05-29"
 
 
@@ -118,7 +118,7 @@ Your response:"""
             
             if isinstance(recs, list) and len(recs) > 0:
                 enriched = []
-                for rec in recs:  # Don't limit to 5 here - take all AI recommendations
+                for rec in recs: 
                     course_name = rec.get('course_name', '').strip()
                     
                     course = next((c for c in COURSE_CATALOG if c['course_name'].lower() == course_name.lower()), None)
@@ -146,7 +146,8 @@ Your response:"""
                             "matched_skills": [], 
                             "reason": rec.get("reason", "Recommended by AI")
                         })
-                
+                if len(enriched) > 0:
+                    return enriched
     return fallback_courses(skills)
 
 def fallback_skills(position: str, seniority_level: str) -> List[str]:
